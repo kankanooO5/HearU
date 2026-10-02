@@ -1,0 +1,19 @@
+{
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"name": "hearu",
+	"compatibility_date": "2026-10-02",
+	"main": "./worker/index.ts",
+	"assets": {
+		"not_found_handling": "single-page-application",
+		"run_worker_first": [
+			"/api/*"
+		]
+	},
+	"d1_databases": [
+		{
+			"binding": "hearu_sync",
+			"database_name": "hearu-sync",
+			"database_id": "03972b94-e138-468d-981b-bc0fabf8c65d"
+		}
+	]
+}

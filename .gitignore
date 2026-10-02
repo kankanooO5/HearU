@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+.sites-runtime/
+site-package.tar.gz
+
+node_modules
+
+.wrangler/
