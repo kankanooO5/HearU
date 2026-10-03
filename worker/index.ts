@@ -11,6 +11,11 @@ interface TranslationRequest {
   vocabulary?: unknown;
 }
 
+interface TitleRequest {
+  transcript?: unknown;
+  course?: unknown;
+}
+
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -280,6 +285,162 @@ async function handleTranslation(
 }
 
 
+
+async function handleSessionTitle(
+  request: Request,
+  apiKey: string,
+): Promise<Response> {
+  try {
+    const body =
+      (await request.json()) as TitleRequest;
+
+    if (
+      typeof body.transcript !== "string"
+    ) {
+      throw new Error(
+        "逐字稿格式无效",
+      );
+    }
+
+    const transcript =
+      body.transcript
+        .trim()
+        .slice(0, 8000);
+
+    if (!transcript) {
+      throw new Error(
+        "逐字稿为空",
+      );
+    }
+
+    const course =
+      typeof body.course === "string"
+        ? body.course
+            .trim()
+            .slice(0, 200)
+        : "";
+
+    const response = await fetch(
+      "https://api.deepseek.com/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "content-type":
+            "application/json",
+          authorization:
+            `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: "deepseek-flash",
+          thinking: {
+            type: "disabled",
+          },
+          max_tokens: 80,
+          response_format: {
+            type: "json_object",
+          },
+          messages: [
+            {
+              role: "system",
+              content:
+                "你正在为一段课堂或讲座记录生成标题。" +
+                "请根据逐字稿概括真正讨论的主题，" +
+                "输出一个自然、具体、易于日后检索的中文标题。" +
+                "优先保留重要人物、地点、时代、概念或主题名称。" +
+                "不要使用“课堂记录”“课程总结”“关于”等空泛措辞。" +
+                "标题尽量控制在8到20个汉字；必要的外文专名可以保留。" +
+                '只输出 JSON：{"title":"标题"}。',
+            },
+            {
+              role: "user",
+              content:
+                `课程名称：${course || "未提供"}\n\n` +
+                `逐字稿：\n${transcript}`,
+            },
+          ],
+        }),
+      },
+    );
+
+    const result =
+      await response
+        .json()
+        .catch(() => ({})) as {
+          choices?: Array<{
+            message?: {
+              content?: unknown;
+            };
+          }>;
+          error?: {
+            message?: unknown;
+          };
+        };
+
+    if (!response.ok) {
+      throw new Error(
+        typeof result.error?.message ===
+          "string"
+          ? result.error.message
+          : `DeepSeek 响应 ${response.status}`,
+      );
+    }
+
+    const content =
+      result.choices?.[0]
+        ?.message?.content;
+
+    if (
+      typeof content !== "string"
+    ) {
+      throw new Error(
+        "标题服务未返回有效内容",
+      );
+    }
+
+    const parsed =
+      JSON.parse(content) as {
+        title?: unknown;
+      };
+
+    if (
+      typeof parsed.title !== "string"
+    ) {
+      throw new Error(
+        "标题响应格式异常",
+      );
+    }
+
+    const title =
+      parsed.title
+        .trim()
+        .replace(
+          /^[“"'《]+|[”"'》]+$/g,
+          "",
+        )
+        .slice(0, 80);
+
+    if (!title) {
+      throw new Error(
+        "标题为空",
+      );
+    }
+
+    return json({
+      title,
+    });
+  } catch (error) {
+    return json(
+      {
+        error:
+          error instanceof Error
+            ? error.message
+            : "标题生成失败",
+      },
+      502,
+    );
+  }
+}
+
 type SyncCourse = {
   id: string;
   name: string;
@@ -290,6 +451,7 @@ type SyncCourse = {
 type SyncSession = {
   id: string;
   course: string;
+  title?: string;
   mode: "classroom" | "conversation";
   language: "it" | "zh";
   startedAt: string;
@@ -319,6 +481,15 @@ type SyncPushRequest = {
   courses?: unknown;
   sessions?: unknown;
   lines?: unknown;
+};
+
+type SyncTombstone = {
+  sessionId: string;
+  deletedAt: number;
+};
+
+type SyncDeleteRequest = {
+  tombstones?: unknown;
 };
 
 function record(value: unknown): Record<string, unknown> {
@@ -433,9 +604,16 @@ function parseSyncSessions(
         ? undefined
         : syncString(x.endedAt, 100);
 
+    const title =
+      x.title === undefined ||
+      x.title === null
+        ? undefined
+        : syncString(x.title, 300);
+
     return {
       id: syncString(x.id, 200),
       course: syncString(x.course, 300),
+      title,
       mode: x.mode,
       language: x.language,
       startedAt:
@@ -508,6 +686,38 @@ function parseSyncLines(
   });
 }
 
+function parseSyncTombstones(
+  value: unknown,
+): SyncTombstone[] {
+  if (
+    !Array.isArray(value) ||
+    value.length > 100
+  ) {
+    throw new Error(
+      "删除同步批次无效",
+    );
+  }
+
+  return value.map(
+    item => {
+      const x =
+        record(item);
+
+      return {
+        sessionId:
+          syncString(
+            x.sessionId,
+            200,
+          ),
+        deletedAt:
+          syncTimestamp(
+            x.deletedAt,
+          ),
+      };
+    },
+  );
+}
+
 function storedVocabulary(
   value: string,
 ): string[] {
@@ -537,6 +747,45 @@ async function handleSyncPush(
     const lines =
       parseSyncLines(body.lines);
 
+    /*
+     * 永久删除具有最终优先级。
+     * 已有 tombstone 的 session / lines
+     * 不允许任何旧设备重新写回。
+     */
+    const tombstoneResult =
+      await env.hearu_sync
+        .prepare(`
+          SELECT session_id
+          FROM session_tombstones
+        `)
+        .all<{
+          session_id: string;
+        }>();
+
+    const tombstonedIds =
+      new Set(
+        tombstoneResult.results.map(
+          item =>
+            item.session_id,
+        ),
+      );
+
+    const writableSessions =
+      sessions.filter(
+        session =>
+          !tombstonedIds.has(
+            session.id,
+          ),
+      );
+
+    const writableLines =
+      lines.filter(
+        line =>
+          !tombstonedIds.has(
+            line.sessionId,
+          ),
+      );
+
     const statements:
       D1PreparedStatement[] = [];
 
@@ -565,12 +814,13 @@ async function handleSyncPush(
       );
     }
 
-    for (const session of sessions) {
+    for (const session of writableSessions) {
       statements.push(
         env.hearu_sync.prepare(`
           INSERT INTO sessions (
             id,
             course,
+            title,
             mode,
             language,
             started_at,
@@ -580,9 +830,10 @@ async function handleSyncPush(
             chunks,
             updated_at
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
             course = excluded.course,
+            title = excluded.title,
             mode = excluded.mode,
             language = excluded.language,
             started_at = excluded.started_at,
@@ -596,6 +847,7 @@ async function handleSyncPush(
         `).bind(
           session.id,
           session.course,
+          session.title ?? null,
           session.mode,
           session.language,
           session.startedAt,
@@ -608,7 +860,7 @@ async function handleSyncPush(
       );
     }
 
-    for (const line of lines) {
+    for (const line of writableLines) {
       statements.push(
         env.hearu_sync.prepare(`
           INSERT INTO lines (
@@ -665,8 +917,10 @@ async function handleSyncPush(
     return json({
       ok: true,
       courses: courses.length,
-      sessions: sessions.length,
-      lines: lines.length,
+      sessions:
+        writableSessions.length,
+      lines:
+        writableLines.length,
     });
   } catch (error) {
     return json(
@@ -675,6 +929,88 @@ async function handleSyncPush(
           error instanceof Error
             ? error.message
             : "同步写入失败",
+      },
+      400,
+    );
+  }
+}
+
+async function handleSyncDelete(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  try {
+    const body =
+      (await request.json()) as SyncDeleteRequest;
+
+    const tombstones =
+      parseSyncTombstones(
+        body.tombstones,
+      );
+
+    const statements:
+      D1PreparedStatement[] = [];
+
+    for (
+      const tombstone of
+      tombstones
+    ) {
+      statements.push(
+        env.hearu_sync
+          .prepare(`
+            INSERT INTO session_tombstones (
+              session_id,
+              deleted_at
+            )
+            VALUES (?, ?)
+            ON CONFLICT(session_id)
+            DO UPDATE SET
+              deleted_at =
+                MAX(
+                  session_tombstones.deleted_at,
+                  excluded.deleted_at
+                )
+          `)
+          .bind(
+            tombstone.sessionId,
+            tombstone.deletedAt,
+          ),
+      );
+
+      /*
+       * lines 有 ON DELETE CASCADE。
+       * 删除 session 即可连带删除云端逐字稿。
+       */
+      statements.push(
+        env.hearu_sync
+          .prepare(`
+            DELETE FROM sessions
+            WHERE id = ?
+          `)
+          .bind(
+            tombstone.sessionId,
+          ),
+      );
+    }
+
+    if (statements.length) {
+      await env.hearu_sync.batch(
+        statements,
+      );
+    }
+
+    return json({
+      ok: true,
+      deleted:
+        tombstones.length,
+    });
+  } catch (error) {
+    return json(
+      {
+        error:
+          error instanceof Error
+            ? error.message
+            : "永久删除同步失败",
       },
       400,
     );
@@ -715,6 +1051,7 @@ async function handleSyncPull(
           SELECT
             id,
             course,
+            title,
             mode,
             language,
             started_at,
@@ -729,6 +1066,7 @@ async function handleSyncPull(
         .all<{
           id: string;
           course: string;
+          title: string | null;
           mode: "classroom" | "conversation";
           language: "it" | "zh";
           started_at: string;
@@ -737,6 +1075,20 @@ async function handleSyncPull(
           vocabulary_json: string;
           chunks: number;
           updated_at: number;
+        }>();
+
+    const tombstonesResult =
+      await env.hearu_sync
+        .prepare(`
+          SELECT
+            session_id,
+            deleted_at
+          FROM session_tombstones
+          ORDER BY deleted_at DESC
+        `)
+        .all<{
+          session_id: string;
+          deleted_at: number;
         }>();
 
     let lines: SyncLine[] = [];
@@ -825,6 +1177,9 @@ async function handleSyncPull(
             id: session.id,
             course:
               session.course,
+            title:
+              session.title ??
+              undefined,
             mode:
               session.mode,
             language:
@@ -848,6 +1203,16 @@ async function handleSyncPull(
         ),
 
       lines,
+
+      tombstones:
+        tombstonesResult.results.map(
+          tombstone => ({
+            sessionId:
+              tombstone.session_id,
+            deletedAt:
+              tombstone.deleted_at,
+          }),
+        ),
     });
   } catch (error) {
     return json(
@@ -924,6 +1289,82 @@ export default {
       return handleTranslation(
         request,
         apiKey,
+      );
+    }
+
+    if (url.pathname === "/api/title") {
+      if (
+        !isSameOriginPost(
+          request,
+          url,
+        )
+      ) {
+        return json(
+          {
+            error:
+              "请求来源未通过验证",
+          },
+          403,
+        );
+      }
+
+      const apiKey =
+        env.DEEPSEEK_API_KEY;
+
+      if (!apiKey) {
+        return json(
+          {
+            error:
+              "标题服务需要配置 DeepSeek API 密钥",
+            code:
+              "SETUP_REQUIRED",
+          },
+          503,
+        );
+      }
+
+      return handleSessionTitle(
+        request,
+        apiKey,
+      );
+    }
+
+    if (
+      url.pathname ===
+      "/api/sync/delete"
+    ) {
+      if (!env.SYNC_KEY) {
+        return json(
+          {
+            error:
+              "同步服务尚未配置",
+            code:
+              "SYNC_SETUP_REQUIRED",
+          },
+          503,
+        );
+      }
+
+      if (
+        request.method !==
+          "POST" ||
+        !isAuthorizedSyncRequest(
+          request,
+          env,
+        )
+      ) {
+        return json(
+          {
+            error:
+              "同步凭证未通过验证",
+          },
+          401,
+        );
+      }
+
+      return handleSyncDelete(
+        request,
+        env,
       );
     }
 

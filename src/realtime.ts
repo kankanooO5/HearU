@@ -208,6 +208,12 @@ export class RealtimeStream {
   private closing = false;
   private opening = false;
 
+  private initialTokenPromise:
+    Promise<{
+      secret: string;
+      requestedAt: number;
+    }> | null = null;
+
   constructor(
     private language: "it" | "zh",
     private vocabulary: string[],
@@ -224,7 +230,10 @@ export class RealtimeStream {
       : 0;
   }
 
-  async start() {
+  async start(
+    microphonePromise?:
+      Promise<MediaStream>,
+  ) {
     if (
       !navigator.mediaDevices?.getUserMedia ||
       !window.AudioWorkletNode
@@ -236,6 +245,20 @@ export class RealtimeStream {
 
     this.closed = false;
     this.closing = false;
+
+    const requestedAt = Date.now();
+
+    this.initialTokenPromise = token(
+      this.language,
+      this.vocabulary,
+    ).then(secret => ({
+      secret,
+      requestedAt,
+    }));
+
+    void this.initialTokenPromise.catch(
+      () => {},
+    );
 
     // iOS Safari requires Web Audio to be unlocked directly
     // from the user's tap gesture. Do this before any async
@@ -255,15 +278,18 @@ export class RealtimeStream {
     }
 
     this.stream =
-      await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-          channelCount: 1,
-        },
-        video: false,
-      });
+      await (
+        microphonePromise ??
+        navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            channelCount: 1,
+          },
+          video: false,
+        })
+      );
 
     this.stream
       .getAudioTracks()
@@ -281,13 +307,13 @@ export class RealtimeStream {
       });
 
     try {
-      await this.startAudioPipeline();
-
-      this.startRecorder();
-
       this.started = Date.now();
 
       void this.connect();
+
+      await this.startAudioPipeline();
+
+      this.startRecorder();
     } catch (error) {
       await this.stop();
       throw error;
@@ -465,10 +491,32 @@ export class RealtimeStream {
       WebSocket | null = null;
 
     try {
-      const secret = await token(
-        this.language,
-        this.vocabulary,
-      );
+      let secret: string;
+
+      const prepared =
+        this.initialTokenPromise;
+
+      this.initialTokenPromise = null;
+
+      if (prepared) {
+        const result =
+          await prepared;
+
+        secret =
+          Date.now() -
+            result.requestedAt <
+          45000
+            ? result.secret
+            : await token(
+                this.language,
+                this.vocabulary,
+              );
+      } else {
+        secret = await token(
+          this.language,
+          this.vocabulary,
+        );
+      }
 
       if (
         this.closed ||
@@ -868,5 +916,6 @@ export class RealtimeStream {
 
     this.socket = null;
     this.encoder = null;
+    this.initialTokenPromise = null;
   }
 }

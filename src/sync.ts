@@ -1,7 +1,10 @@
 import {
   listCourses,
   listLines,
+  listPendingSessionDeletions,
   listSessions,
+  purgeLocalSession,
+  removePendingSessionDeletion,
   saveCourse,
   saveLine,
   saveSession,
@@ -16,10 +19,16 @@ type Synced<T> = T & {
   updatedAt: number;
 };
 
+type SyncTombstone = {
+  sessionId: string;
+  deletedAt: number;
+};
+
 type PullResult = {
   courses: Array<Synced<Course>>;
   sessions: Array<Synced<SavedSession>>;
   lines: Array<Synced<SavedLine>>;
+  tombstones: SyncTombstone[];
 };
 
 export function getSyncKey(): string {
@@ -117,6 +126,43 @@ async function push(
   );
 }
 
+async function pushPendingSessionDeletions():
+  Promise<void> {
+  const pending =
+    await listPendingSessionDeletions();
+
+  if (!pending.length) {
+    return;
+  }
+
+  await request(
+    "/api/sync/delete",
+    {
+      method: "POST",
+      headers: {
+        "content-type":
+          "application/json",
+      },
+      body: JSON.stringify({
+        tombstones: pending,
+      }),
+    },
+  );
+
+  /*
+   * /api/sync/delete 是幂等的。
+   * 服务端确认后才能移除本地待同步任务。
+   */
+  await Promise.all(
+    pending.map(
+      item =>
+        removePendingSessionDeletion(
+          item.sessionId,
+        ),
+    ),
+  );
+}
+
 async function ensureTimestamp<
   T extends {
     updatedAt?: number;
@@ -170,6 +216,8 @@ export async function syncIndex(): Promise<{
   courses: Course[];
   sessions: SavedSession[];
 }> {
+  await pushPendingSessionDeletions();
+
   const [
     localCoursesRaw,
     localSessionsRaw,
@@ -202,6 +250,27 @@ export async function syncIndex(): Promise<{
 
   const remote = await pull();
 
+  const tombstonedIds =
+    new Set(
+      remote.tombstones.map(
+        item =>
+          item.sessionId,
+      ),
+    );
+
+  /*
+   * 云端永久删除优先级最高。
+   * 本机哪怕还留着旧副本，也必须清除。
+   */
+  for (
+    const tombstone of
+    remote.tombstones
+  ) {
+    await purgeLocalSession(
+      tombstone.sessionId,
+    );
+  }
+
   const localCourseMap =
     new Map(
       localCourses.map(
@@ -214,12 +283,19 @@ export async function syncIndex(): Promise<{
 
   const localSessionMap =
     new Map(
-      localSessions.map(
-        (session) => [
-          session.id,
-          session,
-        ],
-      ),
+      localSessions
+        .filter(
+          session =>
+            !tombstonedIds.has(
+              session.id,
+            ),
+        )
+        .map(
+          (session) => [
+            session.id,
+            session,
+          ],
+        ),
     );
 
   for (
@@ -248,6 +324,14 @@ export async function syncIndex(): Promise<{
     const session of
     remote.sessions
   ) {
+    if (
+      tombstonedIds.has(
+        session.id,
+      )
+    ) {
+      continue;
+    }
+
     const local =
       localSessionMap.get(
         session.id,
@@ -355,6 +439,8 @@ export async function syncIndex(): Promise<{
 export async function syncSessionLines(
   sessionId: string,
 ): Promise<SavedLine[]> {
+  await pushPendingSessionDeletions();
+
   const localRaw =
     await listLines(sessionId);
 
@@ -371,6 +457,20 @@ export async function syncSessionLines(
 
   const remote =
     await pull(sessionId);
+
+  if (
+    remote.tombstones.some(
+      item =>
+        item.sessionId ===
+        sessionId,
+    )
+  ) {
+    await purgeLocalSession(
+      sessionId,
+    );
+
+    return [];
+  }
 
   const localMap =
     new Map(
