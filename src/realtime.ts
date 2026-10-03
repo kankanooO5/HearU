@@ -237,6 +237,23 @@ export class RealtimeStream {
     this.closed = false;
     this.closing = false;
 
+    // iOS Safari requires Web Audio to be unlocked directly
+    // from the user's tap gesture. Do this before any async
+    // microphone permission flow.
+    this.context = new AudioContext();
+
+    await this.context.resume();
+
+    await this.context.audioWorklet.addModule(
+      "/capture-worklet.js",
+    );
+
+    if (this.context.state !== "running") {
+      throw new Error(
+        "音频系统未能启动，请再次点击开始",
+      );
+    }
+
     this.stream =
       await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -278,15 +295,7 @@ export class RealtimeStream {
   }
 
   private async startAudioPipeline() {
-    if (!this.stream) return;
-
-    this.context = new AudioContext();
-
-    await this.context.audioWorklet.addModule(
-      "/capture-worklet.js",
-    );
-
-    await this.context.resume();
+    if (!this.stream || !this.context) return;
 
     this.encoder =
       new Pcm16Framer(
