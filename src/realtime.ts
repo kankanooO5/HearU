@@ -23,7 +23,7 @@ type TurnMessage = {
 };
 
 const TARGET_SAMPLE_RATE = 16000;
-const FRAME_SAMPLES = 1600;
+const FRAME_SAMPLES = 800;
 const MIN_FINAL_SAMPLES = 800;
 
 async function token(
@@ -188,10 +188,6 @@ export class RealtimeStream {
   private recorderWrites:
     Promise<unknown> = Promise.resolve();
 
-  private connectedAt = 0;
-  private lastTranscriptAt = 0;
-  private lastVoice = 0;
-  private warnedAt = 0;
   private started = 0;
 
   private reconnects = 0;
@@ -260,6 +256,13 @@ export class RealtimeStream {
       () => {},
     );
 
+    /*
+     * WebSocket 与麦克风 / AudioWorklet 并行启动。
+     * 建立识别连接并不依赖 MediaStream，
+     * 不应等麦克风准备完成后才握手。
+     */
+    void this.connect();
+
     // iOS Safari requires Web Audio to be unlocked directly
     // from the user's tap gesture. Do this before any async
     // microphone permission flow.
@@ -308,8 +311,6 @@ export class RealtimeStream {
 
     try {
       this.started = Date.now();
-
-      void this.connect();
 
       await this.startAudioPipeline();
 
@@ -473,8 +474,7 @@ export class RealtimeStream {
     if (
       this.closed ||
       this.closing ||
-      this.opening ||
-      !this.stream
+      this.opening
     ) {
       return;
     }
@@ -549,10 +549,6 @@ export class RealtimeStream {
             return;
           }
 
-          this.connectedAt = Date.now();
-          this.lastTranscriptAt =
-            this.connectedAt;
-
           this.reconnects = 0;
 
           this.events.status(
@@ -619,9 +615,6 @@ export class RealtimeStream {
             "string"
               ? turn.transcript
               : "";
-
-          this.lastTranscriptAt =
-            Date.now();
 
           if (!turn.end_of_turn) {
             if (text) {
@@ -781,35 +774,9 @@ export class RealtimeStream {
         this.levelData.length,
     );
 
-    const now = Date.now();
-
     this.events.level(
       Math.min(1, rms * 18),
     );
-
-    if (rms > 0.006) {
-      this.lastVoice = now;
-    }
-
-    if (
-      this.socket?.readyState ===
-        WebSocket.OPEN &&
-      this.lastVoice &&
-      now - this.lastVoice < 500 &&
-      now -
-        Math.max(
-          this.lastTranscriptAt,
-          this.connectedAt,
-        ) >
-        8000 &&
-      now - this.warnedAt > 8000
-    ) {
-      this.events.error(
-        "麦克风已收到声音，识别服务仍在处理当前语音",
-      );
-
-      this.warnedAt = now;
-    }
   }
 
   async stop() {

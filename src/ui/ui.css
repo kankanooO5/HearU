@@ -1415,84 +1415,69 @@ body {
     scale(0.94);
 }
 
-/* 删除确认后的离场动画 */
+/* 删除离场由 Web Animations + FLIP 驱动。
+   不再动画 height / min-height，避免 Safari 每帧重排。 */
 
 .history-record-row.is-deleting {
   pointer-events: none;
-
-  animation:
-    history-delete-row
-    240ms
-    cubic-bezier(
-      0.4,
-      0,
-      1,
-      1
-    )
-    forwards;
-}
-
-@keyframes history-delete-row {
-  0% {
-    max-height: 82px;
-    min-height: 70px;
-
-    opacity: 1;
-
-    transform:
-      translateX(0);
-  }
-
-  55% {
-    max-height: 82px;
-    min-height: 70px;
-
-    opacity: 0;
-
-    transform:
-      translateX(-28px);
-  }
-
-  100% {
-    max-height: 0;
-    min-height: 0;
-
-    opacity: 0;
-
-    transform:
-      translateX(-28px);
-  }
 }
 
 /* 回收站 */
 
-.history-record-action {
-  appearance: none;
-
+.history-trash-swipe-actions {
   position: absolute;
-  z-index: 3;
+  z-index: 1;
 
-  right: 4px;
+  right: 6px;
   top: 50%;
 
   transform:
     translateY(-50%);
 
-  height: 34px;
+  display: flex;
+  align-items: center;
 
-  border:
-    1px solid #dddddd;
+  gap: 6px;
+}
+
+.history-trash-swipe-button {
+  appearance: none;
+
+  width: 62px;
+  height: 38px;
 
   border-radius: 999px;
 
-  padding: 0 13px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+
+  -webkit-tap-highlight-color:
+    transparent;
+}
+
+.history-trash-swipe-button.restore {
+  border:
+    1px solid #dddddd;
 
   background: #ffffff;
   color: #111111;
+}
 
-  font: inherit;
-  font-size: 11px;
-  font-weight: 600;
+.history-trash-swipe-button.delete {
+  border: 0;
+
+  background: #ff3b30;
+  color: #ffffff;
+}
+
+.history-trash-swipe-button:active {
+  transform:
+    scale(0.94);
+}
+
+.history-trash-swipe-button:disabled {
+  opacity: 0.45;
 }
 
 /* 逐字稿 */
@@ -1755,191 +1740,6 @@ body {
     transform:
       translateY(0);
   }
-}
-
-/* =========================================================
-   Empty trash
-   ========================================================= */
-
-.history-empty-trash {
-  appearance: none;
-
-  justify-self: end;
-
-  border: 0;
-  background: transparent;
-
-  padding: 8px 0;
-
-  color: #ff3b30;
-
-  font: inherit;
-  font-size: 13px;
-  font-weight: 600;
-
-  -webkit-tap-highlight-color:
-    transparent;
-}
-
-.history-empty-trash:disabled {
-  opacity: 0.28;
-}
-
-.history-list-scroll.is-emptying-trash
-  .history-record-row {
-  animation:
-    trash-list-exit
-    220ms
-    cubic-bezier(
-      0.4,
-      0,
-      1,
-      1
-    )
-    forwards;
-}
-
-.history-list-scroll.is-emptying-trash
-  .history-record-row:nth-child(2) {
-  animation-delay: 18ms;
-}
-
-.history-list-scroll.is-emptying-trash
-  .history-record-row:nth-child(3) {
-  animation-delay: 32ms;
-}
-
-.history-list-scroll.is-emptying-trash
-  .history-record-row:nth-child(n + 4) {
-  animation-delay: 44ms;
-}
-
-@keyframes trash-list-exit {
-  from {
-    opacity: 1;
-
-    transform:
-      translateX(0);
-  }
-
-  to {
-    opacity: 0;
-
-    transform:
-      translateX(-24px);
-  }
-}
-
-.trash-confirm-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 450;
-
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-
-  padding:
-    16px
-    16px
-    calc(
-      16px +
-      env(safe-area-inset-bottom)
-    );
-
-  background:
-    rgba(0, 0, 0, 0.25);
-
-  animation:
-    rename-overlay-in
-    160ms
-    ease-out
-    both;
-}
-
-.trash-confirm-sheet {
-  box-sizing: border-box;
-
-  width:
-    min(
-      480px,
-      100%
-    );
-
-  padding: 20px;
-
-  border-radius: 20px;
-
-  background: #ffffff;
-
-  animation:
-    rename-sheet-in
-    240ms
-    cubic-bezier(
-      0.22,
-      1,
-      0.36,
-      1
-    )
-    both;
-}
-
-.trash-confirm-sheet strong {
-  display: block;
-
-  font-size: 17px;
-  font-weight: 650;
-
-  letter-spacing:
-    -0.025em;
-}
-
-.trash-confirm-sheet p {
-  margin:
-    8px
-    0
-    18px;
-
-  color: #777777;
-
-  font-size: 13px;
-  line-height: 1.5;
-}
-
-.trash-confirm-actions {
-  display: grid;
-  grid-template-columns:
-    1fr
-    1fr;
-
-  gap: 9px;
-}
-
-.trash-confirm-actions button {
-  appearance: none;
-
-  height: 42px;
-
-  border-radius: 11px;
-
-  font: inherit;
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.trash-confirm-cancel {
-  border:
-    1px solid #e2e2e2;
-
-  background: #ffffff;
-  color: #555555;
-}
-
-.trash-confirm-delete {
-  border: 0;
-
-  background: #ff3b30;
-  color: #ffffff;
 }
 
 /* =========================================================

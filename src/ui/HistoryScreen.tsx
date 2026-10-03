@@ -38,22 +38,27 @@ type HistoryScreenProps = {
 
   onTrash: (
     id: string,
-  ) => void;
+  ) => Promise<void>;
 
   onRestore: (
     id: string,
-  ) => void;
+  ) => Promise<void>;
 
   onRename: (
     id: string,
     title: string,
   ) => void;
 
+  onDeletePermanently: (
+    id: string,
+  ) => Promise<void>;
+
   onEmptyTrash:
     () => Promise<void>;
 };
 
 const DELETE_REVEAL = 78;
+const TRASH_REVEAL = 142;
 
 function clock(
   seconds: number,
@@ -94,6 +99,7 @@ export function HistoryScreen({
   onTrash,
   onRestore,
   onRename,
+  onDeletePermanently,
   onEmptyTrash,
 }: HistoryScreenProps) {
   const [
@@ -150,6 +156,13 @@ export function HistoryScreen({
     setEmptyingTrash,
   ] = useState(false);
 
+  const [
+    permanentDeleteId,
+    setPermanentDeleteId,
+  ] = useState<string | null>(
+    null,
+  );
+
   const renameTimer =
     useRef<number | null>(null);
 
@@ -158,6 +171,11 @@ export function HistoryScreen({
 
   const swipeMoved =
     useRef(false);
+
+  const rowRefs =
+    useRef<
+      Map<string, HTMLDivElement>
+    >(new Map());
 
   const swipeGesture =
     useRef<{
@@ -259,8 +277,6 @@ export function HistoryScreen({
     event: React.PointerEvent,
     id: string,
   ) {
-    if (showTrash) return;
-
     if (
       swipeOpenId &&
       swipeOpenId !== id
@@ -276,7 +292,11 @@ export function HistoryScreen({
       startY: event.clientY,
       startOffset:
         swipeOpenId === id
-          ? -DELETE_REVEAL
+          ? -(
+              showTrash
+                ? TRASH_REVEAL
+                : DELETE_REVEAL
+            )
           : 0,
       axis: null,
     };
@@ -331,8 +351,13 @@ export function HistoryScreen({
 
     event.preventDefault();
 
+    const reveal =
+      showTrash
+        ? TRASH_REVEAL
+        : DELETE_REVEAL;
+
     const offset = Math.max(
-      -DELETE_REVEAL,
+      -reveal,
       Math.min(
         0,
         gesture.startOffset +
@@ -369,9 +394,14 @@ export function HistoryScreen({
         event.clientX -
         gesture.startX;
 
+      const reveal =
+        showTrash
+          ? TRASH_REVEAL
+          : DELETE_REVEAL;
+
       const finalOffset =
         Math.max(
-          -DELETE_REVEAL,
+          -reveal,
           Math.min(
             0,
             gesture.startOffset +
@@ -381,7 +411,7 @@ export function HistoryScreen({
 
       if (
         finalOffset <
-        -DELETE_REVEAL * 0.45
+        -reveal * 0.4
       ) {
         setSwipeOpenId(id);
       } else {
@@ -394,19 +424,187 @@ export function HistoryScreen({
       null;
   }
 
-  function deleteWithAnimation(
-    id: string,
+  function captureRowTops() {
+    const tops =
+      new Map<string, number>();
+
+    for (
+      const [
+        id,
+        node,
+      ] of rowRefs.current
+    ) {
+      if (!node.isConnected) {
+        continue;
+      }
+
+      tops.set(
+        id,
+        node.getBoundingClientRect()
+          .top,
+      );
+    }
+
+    return tops;
+  }
+
+  function animateRemainingRows(
+    before:
+      Map<string, number>,
   ) {
+    window.requestAnimationFrame(
+      () => {
+        window.requestAnimationFrame(
+          () => {
+            for (
+              const [
+                id,
+                node,
+              ] of rowRefs.current
+            ) {
+              const oldTop =
+                before.get(id);
+
+              if (
+                oldTop ===
+                undefined ||
+                !node.isConnected
+              ) {
+                continue;
+              }
+
+              const newTop =
+                node.getBoundingClientRect()
+                  .top;
+
+              const delta =
+                oldTop - newTop;
+
+              if (
+                Math.abs(delta) <
+                0.5
+              ) {
+                continue;
+              }
+
+              node.animate(
+                [
+                  {
+                    transform:
+                      `translate3d(0, ${delta}px, 0)`,
+                  },
+                  {
+                    transform:
+                      'translate3d(0, 0, 0)',
+                  },
+                ],
+                {
+                  duration: 220,
+                  easing:
+                    'cubic-bezier(0.22, 1, 0.36, 1)',
+                },
+              );
+            }
+          },
+        );
+      },
+    );
+  }
+
+  async function animateRowRemoval(
+    id: string,
+    remove:
+      () => Promise<void>,
+  ) {
+    if (deletingId) {
+      return;
+    }
+
+    const before =
+      captureRowTops();
+
+    const node =
+      rowRefs.current.get(id);
+
     setDeletingId(id);
     setSwipeOpenId(null);
     setSwipeState(null);
 
-    window.setTimeout(
-      () => {
-        onTrash(id);
-        setDeletingId(null);
-      },
-      240,
+    if (node) {
+      try {
+        await node
+          .animate(
+            [
+              {
+                opacity: 1,
+                transform:
+                  'translate3d(0, 0, 0)',
+              },
+              {
+                opacity: 0,
+                transform:
+                  'translate3d(-18px, 0, 0)',
+              },
+            ],
+            {
+              duration: 150,
+              easing:
+                'cubic-bezier(0.4, 0, 1, 1)',
+              fill: 'forwards',
+            },
+          )
+          .finished;
+      } catch {
+        // animation cancellation is harmless
+      }
+    }
+
+    const removal =
+      remove();
+
+    animateRemainingRows(
+      before,
+    );
+
+    try {
+      await removal;
+    } finally {
+      setDeletingId(
+        current =>
+          current === id
+            ? null
+            : current,
+      );
+    }
+  }
+
+  function deleteWithAnimation(
+    id: string,
+  ) {
+    void animateRowRemoval(
+      id,
+      () => onTrash(id),
+    );
+  }
+
+  function deletePermanentlyWithAnimation(
+    id: string,
+  ) {
+    void animateRowRemoval(
+      id,
+      () =>
+        onDeletePermanently(
+          id,
+        ),
+    );
+  }
+
+  function restoreWithAnimation(
+    id: string,
+  ) {
+    void animateRowRemoval(
+      id,
+      () => onRestore(id),
     );
   }
 
@@ -449,9 +647,17 @@ export function HistoryScreen({
       return swipeState.offset;
     }
 
-    return swipeOpenId === id
-      ? -DELETE_REVEAL
-      : 0;
+    if (
+      swipeOpenId !== id
+    ) {
+      return 0;
+    }
+
+    return -(
+      showTrash
+        ? TRASH_REVEAL
+        : DELETE_REVEAL
+    );
   }
 
   return (
@@ -618,6 +824,10 @@ export function HistoryScreen({
                       return (
                         <div
                           className={`history-record-row ${
+                            showTrash
+                              ? 'is-trash'
+                              : ''
+                          } ${
                             deletingId ===
                             session.id
                               ? 'is-deleting'
@@ -626,6 +836,18 @@ export function HistoryScreen({
                           key={
                             session.id
                           }
+                          ref={node => {
+                            if (node) {
+                              rowRefs.current.set(
+                                session.id,
+                                node,
+                              );
+                            } else {
+                              rowRefs.current.delete(
+                                session.id,
+                              );
+                            }
+                          }}
                         >
                           {!showTrash && (
                             <button
@@ -644,14 +866,10 @@ export function HistoryScreen({
                           <button
                             className="history-record"
                             type="button"
-                            style={
-                              showTrash
-                                ? undefined
-                                : {
-                                    transform:
-                                      `translate3d(${offset}px, 0, 0)`,
-                                  }
-                            }
+                            style={{
+                              transform:
+                                `translate3d(${offset}px, 0, 0)`,
+                            }}
                             onPointerDown={
                               event =>
                                 beginSwipe(
@@ -684,6 +902,23 @@ export function HistoryScreen({
                               if (
                                 showTrash
                               ) {
+                                if (
+                                  swipeMoved.current
+                                ) {
+                                  swipeMoved.current =
+                                    false;
+                                  return;
+                                }
+
+                                if (
+                                  swipeOpenId ===
+                                  session.id
+                                ) {
+                                  setSwipeOpenId(
+                                    null,
+                                  );
+                                }
+
                                 return;
                               }
 
@@ -771,17 +1006,39 @@ export function HistoryScreen({
                           </button>
 
                           {showTrash && (
-                            <button
-                              className="history-record-action restore"
-                              type="button"
-                              onClick={() =>
-                                onRestore(
-                                  session.id,
-                                )
-                              }
-                            >
-                              恢复
-                            </button>
+                            <div className="history-trash-swipe-actions">
+                              <button
+                                className="history-trash-swipe-button restore"
+                                type="button"
+                                disabled={
+                                  deletingId ===
+                                  session.id
+                                }
+                                onClick={() =>
+                                  restoreWithAnimation(
+                                    session.id,
+                                  )
+                                }
+                              >
+                                恢复
+                              </button>
+
+                              <button
+                                className="history-trash-swipe-button delete"
+                                type="button"
+                                disabled={
+                                  deletingId ===
+                                  session.id
+                                }
+                                onClick={() =>
+                                  setPermanentDeleteId(
+                                    session.id,
+                                  )
+                                }
+                              >
+                                删除
+                              </button>
+                            </div>
                           )}
                         </div>
                       );
@@ -875,7 +1132,8 @@ export function HistoryScreen({
         </div>
       </div>
 
-      {showEmptyConfirm && (
+      {(showEmptyConfirm ||
+        permanentDeleteId) && (
         <div
           className="trash-confirm-overlay"
           onPointerDown={event => {
@@ -886,27 +1144,39 @@ export function HistoryScreen({
               setShowEmptyConfirm(
                 false,
               );
+
+              setPermanentDeleteId(
+                null,
+              );
             }
           }}
         >
           <div className="trash-confirm-sheet">
             <strong>
-              清空回收站？
+              {permanentDeleteId
+                ? '永久删除这条记录？'
+                : '清空回收站？'}
             </strong>
 
             <p>
-              这些记录将从本机和云端永久删除，并在其他设备同步后移除。此操作无法恢复。
+              {permanentDeleteId
+                ? '这条记录将从本机和云端永久删除，并在其他设备同步后移除。此操作无法恢复。'
+                : '这些记录将从本机和云端永久删除，并在其他设备同步后移除。此操作无法恢复。'}
             </p>
 
             <div className="trash-confirm-actions">
               <button
                 type="button"
                 className="trash-confirm-cancel"
-                onClick={() =>
+                onClick={() => {
                   setShowEmptyConfirm(
                     false,
-                  )
-                }
+                  );
+
+                  setPermanentDeleteId(
+                    null,
+                  );
+                }}
               >
                 取消
               </button>
@@ -914,9 +1184,26 @@ export function HistoryScreen({
               <button
                 type="button"
                 className="trash-confirm-delete"
-                onClick={() =>
-                  void confirmEmptyTrash()
-                }
+                onClick={() => {
+                  if (
+                    permanentDeleteId
+                  ) {
+                    const id =
+                      permanentDeleteId;
+
+                    setPermanentDeleteId(
+                      null,
+                    );
+
+                    deletePermanentlyWithAnimation(
+                      id,
+                    );
+
+                    return;
+                  }
+
+                  void confirmEmptyTrash();
+                }}
               >
                 永久删除
               </button>
@@ -924,6 +1211,7 @@ export function HistoryScreen({
           </div>
         </div>
       )}
+
 
       {renameTarget && (
         <div

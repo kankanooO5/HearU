@@ -1,6 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { CaptionEngine, TranslationQueue, type CaptionLine, type TranslationTask } from './caption-engine';
+import {
+  CaptionEngine,
+  TranslationQueue,
+  type CaptionLine,
+  type TranslationTask,
+} from './caption-engine';
 import { download } from './audio';
 import { listCourses, listLines, listSessions, saveAudio, saveCourse, saveLine, saveSession, type Course, type SavedSession } from './db';
 import {
@@ -58,6 +63,7 @@ function App() {
   const [vocabText, setVocabText] = useState('');
   const [courses, setCourses] = useState<Course[]>([]);
   const [language, setLanguage] = useState<'it' | 'zh'>('it');
+
   const [status, setStatus] = useState('准备就绪');
   const [configured, setConfigured] = useState<boolean | null>(null);
   const [microphonePermission, setMicrophonePermission] =
@@ -229,8 +235,10 @@ function App() {
   async function trashSession(
     id: string,
   ) {
-    await moveSessionToTrash(id);
-
+    /*
+     * 先更新 UI，再写 IndexedDB。
+     * 删除动画不再等待磁盘写入。
+     */
     setTrashedSessionIds(
       current => {
         const next =
@@ -245,6 +253,20 @@ function App() {
     if (selected === id) {
       setSelected(null);
       setLines([]);
+    }
+
+    try {
+      await moveSessionToTrash(
+        id,
+      );
+    } catch (cause) {
+      setError(
+        '删除失败',
+      );
+
+      await refresh();
+
+      throw cause;
     }
   }
 
@@ -263,6 +285,89 @@ function App() {
         return next;
       },
     );
+  }
+
+  async function deleteTrashedSession(
+    id: string,
+  ) {
+    if (
+      !trashedSessionIds.has(id)
+    ) {
+      return;
+    }
+
+    /*
+     * 乐观移除：
+     * 让 FLIP 动画可以立即得到新的列表位置。
+     */
+    setSessions(previous =>
+      previous.filter(
+        session =>
+          session.id !== id,
+      ),
+    );
+
+    setTrashedSessionIds(
+      current => {
+        const next =
+          new Set(current);
+
+        next.delete(id);
+
+        return next;
+      },
+    );
+
+    if (selected === id) {
+      setSelected(null);
+      setLines([]);
+    }
+
+    try {
+      await permanentlyDeleteLocalSession(
+        id,
+      );
+    } catch (cause) {
+      setError(
+        '永久删除失败',
+      );
+
+      await refresh();
+
+      throw cause;
+    }
+
+    if (hasSyncKey()) {
+      setSyncStatus(
+        '正在永久删除…',
+      );
+
+      try {
+        const synced =
+          await syncIndex();
+
+        setSessions(
+          [...synced.sessions].sort(
+            (a, b) =>
+              b.startedAt.localeCompare(
+                a.startedAt,
+              ),
+          ),
+        );
+
+        setCourses(
+          synced.courses,
+        );
+
+        setSyncStatus(
+          '已同步',
+        );
+      } catch {
+        setSyncStatus(
+          '本机已删除，联网后继续同步删除',
+        );
+      }
+    }
   }
 
   async function emptyTrash() {
@@ -674,6 +779,8 @@ function App() {
     writeRef.current = writeRef.current.then(() => saveSession({ ...session })).catch(() => setError('课堂记录保存中断'));
   }
   function setModeTo(value: 'classroom' | 'conversation') { setMode(value); setView('live'); setLanguage('it'); setLines([]); setError(''); }
+
+
   async function start() {
     if (configured !== true) {
       setError('在线服务正在检查配置');
@@ -737,10 +844,14 @@ function App() {
     sessionRef.current = session;
 
     const engine =
-      new CaptionEngine(updated => {
-        liveLines.current = updated;
-        setLines(updated);
-      });
+      new CaptionEngine(
+        updated => {
+          liveLines.current =
+            updated;
+
+          setLines(updated);
+        },
+      );
 
     engineRef.current = engine;
 
@@ -752,9 +863,9 @@ function App() {
             language,
             vocabulary,
           ),
-        (id, text) => {
+        (task, text) => {
           engine.attachTranslation(
-            id,
+            task,
             text,
           );
 
@@ -1168,19 +1279,20 @@ function App() {
               setLines([]);
             }}
             onExport={exportText}
-            onTrash={id =>
-              void trashSession(id)
+            onTrash={
+              trashSession
             }
-            onRestore={id =>
-              void restoreTrashedSession(
-                id,
-              )
+            onRestore={
+              restoreTrashedSession
             }
             onRename={(id, title) =>
               void renameSession(
                 id,
                 title,
               )
+            }
+            onDeletePermanently={
+              deleteTrashedSession
             }
             onEmptyTrash={
               emptyTrash
