@@ -10,6 +10,7 @@ type Events = {
   complete: (id: string, text: string, at: number) => void;
   committed: (id: string, at: number) => void;
   level: (value: number) => void;
+  waveform: (values: number[]) => void;
   error: (message: string) => void;
 };
 
@@ -70,6 +71,39 @@ class Pcm16Framer {
   ) {}
 
   push(inputFrame: Float32Array): ArrayBuffer[] {
+    const chunks: ArrayBuffer[] = [];
+
+    /*
+     * 正常路径：
+     * AudioContext 已经是 16 kHz，
+     * 这里只做 Float32 → PCM16。
+     *
+     * 不再让已经是 16 kHz 的音频
+     * 经过一次没有意义的插值器。
+     */
+    if (
+      this.inputRate ===
+      TARGET_SAMPLE_RATE
+    ) {
+      for (
+        let i = 0;
+        i < inputFrame.length;
+        i++
+      ) {
+        this.writeSample(
+          inputFrame[i],
+          chunks,
+        );
+      }
+
+      return chunks;
+    }
+
+    /*
+     * 极少数浏览器如果没有兑现
+     * 16 kHz AudioContext 请求，
+     * 才进入兼容重采样路径。
+     */
     const input = new Float32Array(
       this.carry.length + inputFrame.length,
     );
@@ -79,8 +113,6 @@ class Pcm16Framer {
 
     const ratio =
       this.inputRate / TARGET_SAMPLE_RATE;
-
-    const chunks: ArrayBuffer[] = [];
 
     while (
       this.position + 1 < input.length
@@ -167,6 +199,7 @@ class Pcm16Framer {
   }
 }
 
+
 export class RealtimeStream {
   private socket: WebSocket | null = null;
 
@@ -174,6 +207,7 @@ export class RealtimeStream {
 
   private context: AudioContext | null = null;
   private source: MediaStreamAudioSourceNode | null = null;
+
   private analyser: AnalyserNode | null = null;
   private worklet: AudioWorkletNode | null = null;
   private silent: GainNode | null = null;
@@ -242,19 +276,20 @@ export class RealtimeStream {
     this.closed = false;
     this.closing = false;
 
-    const requestedAt = Date.now();
+    const requestedAt =
+      Date.now();
 
-    this.initialTokenPromise = token(
-      this.language,
-      this.vocabulary,
-    ).then(secret => ({
-      secret,
-      requestedAt,
-    }));
+    this.initialTokenPromise =
+      token(
+        this.language,
+        this.vocabulary,
+      ).then(secret => ({
+        secret,
+        requestedAt,
+      }));
 
-    void this.initialTokenPromise.catch(
-      () => {},
-    );
+    void this.initialTokenPromise
+      .catch(() => {});
 
     /*
      * WebSocket 与麦克风 / AudioWorklet 并行启动。
@@ -266,7 +301,18 @@ export class RealtimeStream {
     // iOS Safari requires Web Audio to be unlocked directly
     // from the user's tap gesture. Do this before any async
     // microphone permission flow.
-    this.context = new AudioContext();
+    /*
+     * AssemblyAI Streaming 需要 16 kHz PCM16。
+     *
+     * 直接让 Web Audio 引擎创建 16 kHz context，
+     * 由浏览器底层完成设备采样率 → 16 kHz 的转换，
+     * 避免 HearU 自己的线性重采样成为远场音质瓶颈。
+     */
+    this.context =
+      new AudioContext({
+        sampleRate:
+          TARGET_SAMPLE_RATE,
+      });
 
     await this.context.resume();
 
@@ -286,9 +332,6 @@ export class RealtimeStream {
         navigator.mediaDevices.getUserMedia({
           audio: {
             echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-            channelCount: 1,
           },
           video: false,
         })
@@ -343,6 +386,16 @@ export class RealtimeStream {
       new AudioWorkletNode(
         this.context,
         "capture-processor",
+        {
+          processorOptions: {
+            frameSamples:
+              Math.round(
+                this.context
+                  .sampleRate *
+                0.10,
+              ),
+          },
+        },
       );
 
     this.silent =
@@ -364,7 +417,9 @@ export class RealtimeStream {
       const input =
         event.data instanceof Float32Array
           ? event.data
-          : new Float32Array(event.data);
+          : new Float32Array(
+              event.data,
+            );
 
       for (
         const chunk of
@@ -374,11 +429,29 @@ export class RealtimeStream {
       }
     };
 
-    this.source.connect(this.analyser);
-    this.source.connect(this.worklet);
+    /*
+     * 唯一实时识别链路：
+     *
+     * Microphone
+     * → Web Audio
+     * → PCM16
+     * → AssemblyAI
+     */
+    this.source.connect(
+      this.analyser,
+    );
 
-    this.analyser.connect(this.silent);
-    this.worklet.connect(this.silent);
+    this.source.connect(
+      this.worklet,
+    );
+
+    this.analyser.connect(
+      this.silent,
+    );
+
+    this.worklet.connect(
+      this.silent,
+    );
 
     this.silent.connect(
       this.context.destination,
@@ -394,7 +467,7 @@ export class RealtimeStream {
 
     this.monitor = setInterval(() => {
       this.sampleAudioLevel();
-    }, 100);
+    }, 40);
   }
 
   private startRecorder() {
@@ -454,14 +527,38 @@ export class RealtimeStream {
     const params =
       new URLSearchParams({
         token: secret,
+
         sample_rate:
-          String(TARGET_SAMPLE_RATE),
-        encoding: "pcm_s16le",
-        format_turns: "true",
+          String(
+            TARGET_SAMPLE_RATE,
+          ),
+
+        encoding:
+          "pcm_s16le",
+
+        /*
+         * HearU 统一使用 AssemblyAI
+         * Universal-3.6 Pro Realtime。
+         */
         speech_model:
-          this.language === "zh"
-            ? "whisper-rt"
-            : "universal-streaming-multilingual",
+          "universal-3-6-pro",
+
+        /*
+         * AssemblyAI Streaming 当前使用
+         * language_codes（复数）。
+         *
+         * HearU 的课堂语言是明确已知的，
+         * 因此这里只 steering 到当前语言。
+         */
+        language_codes:
+          this.language,
+
+        /*
+         * 与已经验证成功的本地 WAV
+         * Streaming 测试保持一致。
+         */
+        mode:
+          "max_accuracy",
       });
 
     return (
@@ -496,7 +593,8 @@ export class RealtimeStream {
       const prepared =
         this.initialTokenPromise;
 
-      this.initialTokenPromise = null;
+      this.initialTokenPromise =
+        null;
 
       if (prepared) {
         const result =
@@ -504,8 +602,8 @@ export class RealtimeStream {
 
         secret =
           Date.now() -
-            result.requestedAt <
-          45000
+              result.requestedAt <
+            45000
             ? result.secret
             : await token(
                 this.language,
@@ -527,13 +625,26 @@ export class RealtimeStream {
 
       const socket =
         new WebSocket(
-          this.buildSocketUrl(secret),
+          this.buildSocketUrl(
+            secret,
+          ),
         );
 
       socketForCleanup = socket;
 
       const namespace =
         `rt${++this.connectionCounter}:`;
+
+      /*
+       * AssemblyAI 有时会先返回非空 partial，
+       * 随后用 transcript="" 的 final Turn
+       * 结束同一个 turn。
+       *
+       * 保存每个 turn 最近一次非空文本，
+       * 防止 final 空字符串把已经识别出的词擦掉。
+       */
+      const lastTurnText =
+        new Map<string, string>();
 
       this.socket = socket;
 
@@ -566,6 +677,13 @@ export class RealtimeStream {
             return;
           }
 
+          if (
+            typeof event.data !==
+            "string"
+          ) {
+            return;
+          }
+
           let message: any;
 
           try {
@@ -575,6 +693,9 @@ export class RealtimeStream {
             return;
           }
 
+          // -------------------------
+          // AssemblyAI
+          // -------------------------
           if (
             message.type ===
             "Termination"
@@ -590,6 +711,7 @@ export class RealtimeStream {
               message.error ||
                 "识别服务暂时异常",
             );
+
             return;
           }
 
@@ -602,7 +724,8 @@ export class RealtimeStream {
           const turn =
             message as TurnMessage;
 
-          const at = this.elapsed;
+          const at =
+            this.elapsed;
 
           const id =
             namespace +
@@ -610,11 +733,27 @@ export class RealtimeStream {
               turn.turn_order ?? 0,
             );
 
-          const text =
+          const incomingText =
             typeof turn.transcript ===
             "string"
-              ? turn.transcript
+              ? turn.transcript.trim()
               : "";
+
+          if (incomingText) {
+            lastTurnText.set(
+              id,
+              incomingText,
+            );
+          }
+
+          /*
+           * final transcript 为空时，
+           * 回退到这个 turn 最近一次非空版本。
+           */
+          const text =
+            incomingText ||
+            lastTurnText.get(id) ||
+            "";
 
           if (!turn.end_of_turn) {
             if (text) {
@@ -684,6 +823,7 @@ export class RealtimeStream {
           socketForCleanup
       ) {
         this.socket = null;
+
         socketForCleanup.close();
       }
 
@@ -777,6 +917,121 @@ export class RealtimeStream {
     this.events.level(
       Math.min(1, rms * 18),
     );
+
+    // 从实际音频中取最近约 60ms。
+    // 改成更偏“主波形”的 signed-energy 取样，
+    // 再做两次平滑，让可见波峰收成约 1.5 组，
+    // 避免像蜈蚣一样太碎。
+    const data = this.levelData;
+    const count = 13;
+    const length = Math.min(
+      960,
+      data.length,
+    );
+    const offset =
+      data.length - length;
+
+    // 环境噪音时尽量贴近平线；
+    // 出现较明确的人声起伏时再明显抬升。
+    const activity =
+      rms < 0.00012
+        ? 0
+        : Math.min(
+            1,
+            Math.sqrt(
+              Math.max(
+                0,
+                rms - 0.00012,
+              ) * 380,
+            ),
+          );
+
+    const reference =
+      Math.max(
+        0.00045,
+        rms * 2.2,
+      );
+
+    const waveform: number[] = [];
+
+    for (let i = 0; i < count; i++) {
+      const from = offset +
+        Math.floor(
+          i * length / count,
+        );
+
+      const to = offset +
+        Math.floor(
+          (i + 1) * length / count,
+        );
+
+      let signed = 0;
+      let weight = 0;
+
+      for (let j = from; j < to; j++) {
+        const sample = data[j];
+        const abs = Math.abs(sample);
+
+        signed += sample * abs;
+        weight += abs;
+      }
+
+      const value =
+        weight > 1e-6
+          ? signed / weight
+          : 0;
+
+      waveform.push(
+        Math.max(
+          -1,
+          Math.min(
+            1,
+            value / reference,
+          ),
+        ) * activity,
+      );
+    }
+
+    for (let pass = 0; pass < 2; pass++) {
+      const smoothed =
+        waveform.map(
+          (value, i) => {
+            const left =
+              waveform[
+                Math.max(0, i - 1)
+              ] ?? 0;
+
+            const right =
+              waveform[
+                Math.min(
+                  count - 1,
+                  i + 1,
+                )
+              ] ?? 0;
+
+            if (
+              i === 0 ||
+              i === count - 1
+            ) {
+              return value * 0.72;
+            }
+
+            return (
+              left * 0.22 +
+              value * 0.56 +
+              right * 0.22
+            );
+          },
+        );
+
+      waveform.splice(
+        0,
+        waveform.length,
+        ...smoothed,
+      );
+    }
+
+    this.events.waveform(waveform);
   }
 
   async stop() {
@@ -828,7 +1083,8 @@ export class RealtimeStream {
 
       socket.send(
         JSON.stringify({
-          type: "Terminate",
+          type:
+            "Terminate",
         }),
       );
 
@@ -883,6 +1139,7 @@ export class RealtimeStream {
 
     this.socket = null;
     this.encoder = null;
+
     this.initialTokenPromise = null;
   }
 }

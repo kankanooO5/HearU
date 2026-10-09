@@ -73,12 +73,19 @@ export function acquireMicrophoneStream():
     );
   }
 
+  /*
+   * 默认课堂采集策略。
+   *
+   * 实际课堂测试中，浏览器回声消除会明显
+   * 削弱远处教师语音，因此明确关闭。
+   *
+   * 其余采集参数交给浏览器 / 系统选择，
+   * 不额外强制 noise suppression、
+   * auto gain control 或声道数。
+   */
   return navigator.mediaDevices.getUserMedia({
     audio: {
       echoCancellation: false,
-      noiseSuppression: false,
-      autoGainControl: false,
-      channelCount: 1,
     },
     video: false,
   });
