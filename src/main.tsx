@@ -14,7 +14,10 @@ import {
   permanentlyDeleteLocalSession,
   restoreSessionFromTrash,
 } from './db';
-import { RealtimeStream, type StreamStatus } from './realtime';
+import {
+  RealtimeStream,
+  type StreamStatus,
+} from './realtime';
 import {
   acquireMicrophoneStream,
   getMicrophonePermissionState,
@@ -71,6 +74,8 @@ function App() {
   const [recording, setRecording] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [level, setLevel] = useState(0);
+  const waveformRef =
+    useRef<number[]>([]);
   const [lines, setLines] = useState<CaptionLine[]>([]);
   const [sessions, setSessions] = useState<SavedSession[]>([]);
   const [trashedSessionIds, setTrashedSessionIds] =
@@ -933,6 +938,9 @@ function App() {
           ),
 
         level: setLevel,
+        waveform: values => {
+          waveformRef.current = values;
+        },
 
         error: message =>
           setError(message),
@@ -1176,6 +1184,7 @@ function App() {
                 status === '正在听'
               }
               level={level}
+              waveformRef={waveformRef}
               lines={interpreterLines}
               activeLineId={
                 activeLine?.id
